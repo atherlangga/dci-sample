@@ -1,6 +1,7 @@
 <?php
 
 ////////////////////////////////////////////////////////////////////////////////
+// Library
 
 class DCI {
     private static $dciMethodsVarName = "_dci_methods";
@@ -16,6 +17,19 @@ class DCI {
             $closure = $reflectionMethod->getClosure($obj);
             $object->{self::$dciMethodsVarName}[$reflectionMethod->name] =
                 Closure::bind($closure, $object);
+        }
+    }
+
+    public static function detachMethods($object, $className) {
+        if (!property_exists($object, self::$dciMethodsVarName)) {
+            return;
+        }
+
+        $obj = new $className;
+        $reflection = new ReflectionClass($obj);
+        foreach ($reflection->getMethods() as $reflectionMethod) {
+            $closure = $reflectionMethod->getClosure($obj);
+            unset($object->{self::$dciMethodsVarName}[$reflectionMethod->name]);
         }
     }
 
@@ -68,19 +82,25 @@ class DCI {
 // Data
 
 class Account {
-    public $ledgers = [];
+    private $ledgerEntries = [];
 
+    // Define magic methods that will be used by DCI.
+    // TODO: Find a more non-intrusive way to do this.
     function __call($methodName, $args) {
         if (DCI::isCallable($this, $methodName)) {
             return DCI::callMethod($this, $methodName, $args);
         }
     }
 
+    public function appendLedgerEntry($newEntry) {
+        $this->ledgerEntries[] = $newEntry;
+    }
+
     public function currentBalance() {
         $currentBalance = 0;
 
-        foreach ($this->ledgers as $ledger) {
-            $currentBalance += $ledger;
+        foreach ($this->ledgerEntries as $ledgerEntry) {
+            $currentBalance += $ledgerEntry;
         }
 
         return $currentBalance;
@@ -93,16 +113,16 @@ class Account {
 
 interface MoneySourceContract {
     function availableBalance();
-    function decreaseBalance();
+    function decreaseBalance($amount);
 }
 
 interface MoneyDestinationContract {
-    function increaseBalance();
+    function increaseBalance($amount);
 }
 
 class MoneySourceRoleMethods {
     public function sendTransfer($moneySink, $amount) {
-        if ($this->currentBalance() >= $amount) {
+        if ($this->availableBalance() >= $amount) {
             $this->decreaseBalance($amount);
             $moneySink->receiveTransfer($amount);
         }
@@ -112,6 +132,22 @@ class MoneySourceRoleMethods {
 class MoneyDestinationRoleMethods {
     public function receiveTransfer($amount) {
         $this->increaseBalance($amount);
+    }
+}
+
+class MoneySourceAccount {
+    public function availableBalance() {
+        return $this->currentBalance();
+    }
+
+    public function decreaseBalance($amount) {
+        $this->appendLedgerEntry(-$amount);
+    }
+}
+
+class MoneyDestinationAccount {
+    public function increaseBalance($amount) {
+        $this->appendLedgerEntry($amount);
     }
 }
 
@@ -128,21 +164,33 @@ class TransferMoney {
         $this->destination = $destination;
         $this->amount      = $amount;
 
-        // Make sure the contract for both $source and $destionation are fullfilled,
-        // otherwise, throw Exceptions.
+        DCI::attachMethods($this->source, "MoneySourceAccount");
+        DCI::attachMethods($this->destination, "MoneyDestinationAccount");
+    }
+
+    public function execute() {
+        $this->setUp();
+        $this->source->sendTransfer($this->destination, $this->amount);
+        $this->tearDown();
+    }
+
+    private function setUp() {
+        // Make sure the contract for both $source and $destination are
+        // fullfilled. Otherwise, throw Exceptions.
         DCI::assertContractFulfilled(
             $this->source, "MoneySourceContract");
         DCI::assertContractFulfilled(
             $this->destination, "MoneyDestinationContract");
 
-        // If both $source and $destionation fullfills the contract, attach the
-        // methods on them.
+        // If both $source and $destination fullfills the contract, attach the
+        // appropriate methods on them.
         DCI::attachMethods($this->source, "MoneySourceRoleMethods");
         DCI::attachMethods($this->destination, "MoneyDestinationRoleMethods");
     }
 
-    public function execute() {
-        $this->source->sendTransfer($this->destination, $this->amount);
+    private function tearDown() {
+        DCI::detachMethods($this->source, "MoneySourceRoleMethods");
+        DCI::detachMethods($this->destination, "MoneyDestinationRoleMethods");
     }
 }
 
@@ -150,30 +198,11 @@ class TransferMoney {
 ////////////////////////////////////////////////////////////////////////////////
 // Application
 
-class MoneySourceAccount {
-    public function availableBalance() {
-        return $this->currentBalance();
-    }
-
-    public function decreaseBalance($amount) {
-        $this->ledgers[] = -$amount;
-    }
-}
-
-class MoneyDestinationAccount {
-    public function increaseBalance($amount) {
-        $this->ledgers[] = $amount;
-    }
-}
-
 $account1 = new Account();
 $account2 = new Account();
 
-DCI::attachMethods($account1, "MoneySourceAccount");
-DCI::attachMethods($account2, "MoneyDestinationAccount");
-
-$account1->ledgers[] = 1000;
-$account2->ledgers[] =  500;
+$account1->appendLedgerEntry(1000);
+$account2->appendLedgerEntry(500);
 
 echo "Before: \n";
 echo "account1: " . $account1->currentBalance() . "\n";
